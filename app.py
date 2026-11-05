@@ -25,8 +25,25 @@ h1,h2,h3 {letter-spacing:-.02em}
 def fetch_market(symbol: str, start: str, end: str, kind: str = "equity") -> pd.DataFrame:
     from vnstock import Market
     market = Market()
-    raw = market.index(symbol).ohlcv(start=start, end=end, interval="1D") if kind == "index" else market.equity(symbol).ohlcv(start=start, end=end, interval="1D")
+    # VCI có thể trả HTTP 403 từ môi trường cloud. Thử KBS trước,
+    # sau đó mới fallback về VCI; không để lỗi một nhà cung cấp làm sập app.
+    providers = ("kbs", "vci")
+    errors = []
+    raw = None
+    used_source = None
+    for provider in providers:
+        try:
+            instrument = market.index(symbol) if kind == "index" else market.equity(symbol)
+            raw = instrument.ohlcv(start=start, end=end, interval="1D", source=provider)
+            used_source = provider
+            break
+        except Exception as exc:
+            errors.append(f"{provider}: {exc}")
+    if raw is None:
+        raise RuntimeError("Không lấy được dữ liệu từ các nguồn KBS/VCI. " + " | ".join(errors))
     d = pd.DataFrame(raw).copy()
+    d.attrs["source"] = used_source
+    d.attrs["source_errors"] = errors
     d.columns = [str(c).strip().lower() for c in d.columns]
     aliases = {"time":"date","trading_date":"date","datetime":"date","tradingdate":"date","vol":"volume"}
     d = d.rename(columns={c:aliases.get(c,c) for c in d.columns})
@@ -40,6 +57,8 @@ def fetch_market(symbol: str, start: str, end: str, kind: str = "equity") -> pd.
     for c in required[1:]: d[c] = pd.to_numeric(d[c], errors="coerce")
     d = d.dropna(subset=["date","close"]).sort_values("date").drop_duplicates("date").reset_index(drop=True)
     d["volume"] = d["volume"].fillna(0)
+    d.attrs["source"] = used_source
+    d.attrs["source_errors"] = errors
     if kind == "equity" and len(d) and d["close"].median() < 1000:
         d[["open","high","low","close"]] *= 1000
     return d
